@@ -28,9 +28,26 @@ module RegFile (
 );
   localparam NumRegs = 32;
   reg [`REG_SIZE:0] regs[0:NumRegs-1];
+  integer i;
 
   // TODO: your code here
+  always @(posedge clk) begin
+    if (rst) begin
+      for (i = 0; i < NumRegs; i = i + 1) begin
+        regs[i] <= 0;
+      end
+    end else begin
+      if (we && (rd != 0)) begin
+        regs[rd] <= rd_data;
+      end
+    end
+  end
 
+  always @(*) begin
+    rs1_data = (rs1 == 5'd0) ? 0 : regs[rs1];
+    rs2_data = (rs2 == 5'd0) ? 0 : regs[rs2];
+  end
+  
 endmodule
 
 module DatapathPipelined (
@@ -87,6 +104,11 @@ module DatapathPipelined (
       localparam ALU_SLL  = 4'b0111;
       localparam ALU_SRL  = 4'b1000;
       localparam ALU_SRA  = 4'b1001;
+      localparam ALU_MUL  = 4'b1010;
+      localparam ALU_MULH = 4'b1011;
+      localparam ALU_MULHSU = 4'b1100;
+      localparam ALU_MULHU = 4'b1101;
+    
     
     // Funct3 Codes
     // Arithmetic / Logic
@@ -106,6 +128,18 @@ module DatapathPipelined (
       localparam F3_BGE     = 3'b101;
       localparam F3_BLTU    = 3'b110;
       localparam F3_BGEU    = 3'b111;
+      
+      // Extend multiply
+      localparam F3_MUL     = 3'b000;
+      localparam F3_MULH    = 3'b001;
+      localparam F3_MULHSU  = 3'b010;
+      localparam F3_MULHU   = 3'b011;
+      
+      //Extend divide
+      localparam F3_DIV     = 3'b100;
+      localparam F3_DIVU    = 3'b101;
+      localparam F3_REM     = 3'b110;
+      localparam F3_REMU    = 3'b111;
     
       // Load/Store
       localparam F3_B       = 3'b000; // Byte
@@ -115,11 +149,11 @@ module DatapathPipelined (
       // 4. Funct7 Codes
       localparam F7_NORMAL  = 7'b0000000;
       localparam F7_SUB_SRA = 7'b0100000;
-   
+      localparam F7_M_EXT   = 7'b0000001;
+      
   // Pipeline regs
   // IF/ID
-    reg [`REG_SIZE:0] d_pc;
-    reg [`INST_SIZE:0] d_inst;
+    reg [`REG_SIZE:0] d_pc, d_inst;
   
   // ID/EX Registers
     reg [`REG_SIZE:0] x_pc;
@@ -128,6 +162,8 @@ module DatapathPipelined (
     reg [4:0] x_rs1_addr, x_rs2_addr, x_rd_addr;
     reg [3:0] x_alu_op;
     reg x_reg_we, x_mem_we, x_branch, x_jump, x_jal, x_jalr, x_load, x_auipc, x_lui;
+    reg x_is_div_op, x_div_signed, x_div_get_rem; 
+    reg [2:0] x_funct3; 
     reg [1:0] x_op1_sel, x_op2_sel;
     reg [3:0] x_mem_mask;
     reg [`INST_SIZE:0] x_inst; 
@@ -136,18 +172,28 @@ module DatapathPipelined (
     reg [`REG_SIZE:0] m_pc;
     reg [`REG_SIZE:0] m_alu_result;
     reg [`REG_SIZE:0] m_store_data;
-    reg [4:0] m_rd_addr;
+    reg [4:0] m_rd_addr, m_rs2_addr;
     reg m_reg_we, m_mem_we, m_load;
+    reg [2:0] m_funct3;
+    
     reg [3:0] m_mem_mask;
     reg [`INST_SIZE:0] m_inst;
 
   // MEM/WB Registers
-    reg [`REG_SIZE:0] w_pc;
-    reg [`REG_SIZE:0] w_alu_result;
-    reg [`REG_SIZE:0] w_mem_data;
+    reg [`REG_SIZE:0] w_pc, w_alu_result, w_mem_data;
     reg [4:0] w_rd_addr;
     reg w_reg_we, w_load;
-    reg [`INST_SIZE:0] w_inst;  
+    reg [2:0] w_funct3;
+    reg [1:0] w_byte_offset;
+    reg [`INST_SIZE:0] w_inst;
+      
+    // check divider
+    reg [6:0] div_busy [0:7];
+    
+  // Stall (Hazard control) signal
+  wire stall_pipeline; // stall all (hazard)      
+  wire stall_load_use; // stall load      
+  wire stall_div_dependency; //stall depend
     
   /***************/
   /* FETCH STAGE */
@@ -173,7 +219,6 @@ module DatapathPipelined (
     end
     // send PC to imem
     assign pc_to_imem = f_pc_current;
-    assign f_inst = inst_from_imem;
 
     always @(posedge clk) begin
         if (rst || branch_taken) begin
@@ -213,12 +258,34 @@ module DatapathPipelined (
         if (w_reg_we && (w_rd_addr != 0) && (w_rd_addr == rs2)) rf_rs2_data_fwd = wb_data;
         else rf_rs2_data_fwd = rf_rs2_data_raw;
     end
+    
+    // Hazard detection
+    // Divider denpendency
+    integer i;
+    reg conflict_div;
+    
+    always @(*) begin
+        conflict_div = 0;
+        for (i = 0; i < 8; i = i + 1) begin
+            if (div_busy[i][6] && div_busy[i][4:0] != 0 && (div_busy[i][4:0] == rs1 || div_busy[i][4:0] == rs2)) 
+              conflict_div = 1;
+        end    
+    end
+    
+    assign stall_div_dependency = conflict_div;
+    
+    // Load hazard
+    assign stall_load_use = (x_load && (x_rd_addr != 0) && 
+                            (x_rd_addr == rs1 || x_rd_addr == rs2));
+    
+    //Stall all
+    assign stall_pipeline = stall_div_dependency || stall_load_use;
 
     // Control logic
     reg [4:0] ctrl_alu_op;
     reg ctrl_reg_we, ctrl_mem_we, ctrl_branch, ctrl_jal, ctrl_jalr, ctrl_load, ctrl_auipc, ctrl_lui;
-    reg [3:0] ctrl_mem_mask;
-    reg [1:0] ctrl_op1_sel; 
+    reg ctrl_is_div_op, ctrl_div_signed, ctrl_div_get_rem;
+    reg [1:0] ctrl_op1_sel;
     reg [1:0] ctrl_op2_sel;
 
     always @(*) begin
@@ -231,14 +298,33 @@ module DatapathPipelined (
         ctrl_load = 0; 
         ctrl_auipc = 0; 
         ctrl_lui = 0;
-        ctrl_mem_mask = 4'b0000; 
         ctrl_op1_sel = 0; 
         ctrl_op2_sel = 0;
         
         case (opcode) 
             OpcodeRegReg: begin
                 ctrl_reg_we = 1;
-                if (funct7 == F7_NORMAL) begin 
+                if (funct7 == F7_M_EXT) begin
+                    case (funct3)
+                        F3_MUL:    ctrl_alu_op = ALU_MUL;
+                        F3_MULH:   ctrl_alu_op = ALU_MULH;
+                        F3_MULHSU: ctrl_alu_op = ALU_MULHSU;
+                        F3_MULHU:  ctrl_alu_op = ALU_MULHU;
+                        F3_DIV:  begin 
+                            ctrl_is_div_op=1; 
+                            ctrl_div_signed=1; 
+                            ctrl_div_get_rem=0; 
+                        end
+                        F3_DIVU: begin 
+                            ctrl_is_div_op=1; 
+                            ctrl_div_signed=0; 
+                            ctrl_div_get_rem=0; 
+                        end
+                        F3_REM:  begin ctrl_is_div_op=1; ctrl_div_signed=1; ctrl_div_get_rem=1; end
+                        F3_REMU: begin ctrl_is_div_op=1; ctrl_div_signed=0; ctrl_div_get_rem=1; end
+                    endcase
+                end
+                else if (funct7 == F7_NORMAL) begin 
                     case(funct3)
                         F3_ADD_SUB: ctrl_alu_op = ALU_ADD;
                         F3_SLL:     ctrl_alu_op = ALU_SLL;
@@ -250,7 +336,7 @@ module DatapathPipelined (
                         F3_AND:     ctrl_alu_op = ALU_AND;
                     endcase
                 end 
-                else if (funct7 == F7_SUB_SRA) begin 
+                else begin  
                     case(funct3)
                         F3_ADD_SUB: ctrl_alu_op = ALU_SUB;
                         F3_SRL_SRA: ctrl_alu_op = ALU_SRA;
@@ -284,9 +370,9 @@ module DatapathPipelined (
                 ctrl_mem_we = 1; 
                 ctrl_op2_sel = 2; // imm_s
                 ctrl_alu_op = ALU_ADD;
-                if (funct3 == F3_B) ctrl_mem_mask = 4'b0001;
-                else if (funct3 == F3_H) ctrl_mem_mask = 4'b0011;
-                else ctrl_mem_mask = 4'b1111; // Word
+//                if (funct3 == F3_B) ctrl_mem_mask = 4'b0001;
+//                else if (funct3 == F3_H) ctrl_mem_mask = 4'b0011;
+//                else ctrl_mem_mask = 4'b1111; // Word
             end
             
             OpcodeBranch: begin
@@ -333,10 +419,11 @@ module DatapathPipelined (
     end
     
     always @(posedge clk) begin
-        if (rst || branch_taken) begin 
+        if (rst || branch_taken || stall_pipeline) begin 
             x_reg_we <= 0; 
             x_mem_we <= 0; 
             x_branch <= 0; 
+            x_is_div_op <= 0;
             x_jal <= 0; 
             x_jalr <= 0;
             x_inst <= 0; 
@@ -357,19 +444,27 @@ module DatapathPipelined (
             x_load <= ctrl_load;
             x_auipc <= ctrl_auipc;
             x_lui <= ctrl_lui;
+            x_is_div_op <= ctrl_is_div_op;
+            x_div_signed <= ctrl_div_signed;
+            x_div_get_rem <= ctrl_div_get_rem;
             x_op1_sel <= ctrl_op1_sel;
             x_op2_sel <= ctrl_op2_sel;
-            x_mem_mask <= ctrl_mem_mask;
+            x_funct3 <= funct3;
+//            x_mem_mask <= ctrl_mem_mask;
             x_inst <= d_inst;
         end
     end
 
+    wire final_rf_we;
+    reg [4:0] final_rf_dst;
+    reg [`REG_SIZE:0] final_rf_data;
+    
     RegFile rf (
         .clk(clk), 
         .rst(rst), 
-        .we(w_reg_we), 
-        .rd(w_rd_addr), 
-        .rd_data(wb_data),
+        .we(final_rf_we), 
+        .rd(final_rf_dst), 
+        .rd_data(final_rf_data),
         .rs1(rs1), 
         .rs2(rs2), 
         .rs1_data(rf_rs1_data_raw), 
@@ -378,6 +473,208 @@ module DatapathPipelined (
 
   // TODO: your code here, though you will also need to modify some of the code above
   // TODO: the testbench requires that your register file instance is named `rf`
+
+  /****************/
+  /* EXECUTE STAGE */
+  /****************/
+    
+    reg [`REG_SIZE:0] alu_op1_fwd, alu_op2_fwd;
+    always @(*) begin
+        if (m_reg_we && m_rd_addr != 0 && m_rd_addr == x_rs1_addr) alu_op1_fwd = m_alu_result; 
+        
+        else if (w_reg_we && w_rd_addr != 0 && w_rd_addr == x_rs1_addr) alu_op1_fwd = wb_data;      
+
+        else alu_op1_fwd = x_rs1_data;
+
+        if (m_reg_we && m_rd_addr != 0 && m_rd_addr == x_rs2_addr) alu_op2_fwd = m_alu_result; 
+        
+        else if (w_reg_we && w_rd_addr != 0 && w_rd_addr == x_rs2_addr) alu_op2_fwd = wb_data; 
+             
+        else alu_op2_fwd = x_rs2_data;
+    end
+
+    wire [`REG_SIZE:0] alu_in1 = (x_auipc) ? x_pc : ((x_lui) ? 0 : alu_op1_fwd);
+    wire [`REG_SIZE:0] alu_in2 = (x_jal || x_auipc || x_lui || x_op2_sel == 1 || x_op2_sel == 2) ? x_imm : alu_op2_fwd;
+
+    wire [`REG_SIZE:0] alu_result;
+    ALU alu_inst (
+        .A(alu_in1), 
+        .B(alu_in2), 
+        .ALUOp(x_alu_op), 
+        .result(alu_result), 
+        .Zero()
+    );
+    
+    // Divider
+    wire [31:0] div_quotient, div_remainder;
+    DividerPipelined div_inst (
+        .clk(clk), 
+        .rst(rst), 
+        .stall(1'b0), 
+        .is_signed(x_div_signed),
+        .i_dividend(alu_op1_fwd), .i_divisor(alu_op2_fwd),
+        .o_remainder(div_remainder), .o_quotient(div_quotient)
+    );
+  
+    integer j;
+    always @(posedge clk) begin
+        if (rst) begin
+            for(j = 0; j < 8; j = j + 1) div_busy[j] <= 0;
+        end
+        else begin
+            for(j=1; j<8; j=j+1) begin
+                div_busy[j] <= div_busy[j-1];
+            end
+            div_busy[0] <= {x_is_div_op, x_div_get_rem, x_rd_addr};
+        end
+    end
+
+    //Branching logic
+    wire branch_cond = (x_branch && (
+      (x_funct3 == F3_BEQ  && alu_op1_fwd == alu_op2_fwd) || 
+      (x_funct3 == F3_BNE  && alu_op1_fwd != alu_op2_fwd) || 
+      (x_funct3 == F3_BLT  && $signed(alu_op1_fwd) < $signed(alu_op2_fwd)) || 
+      (x_funct3 == F3_BGE  && $signed(alu_op1_fwd) >= $signed(alu_op2_fwd))|| 
+      (x_funct3 == F3_BLTU && alu_op1_fwd < alu_op2_fwd)  || 
+      (x_funct3 == F3_BGEU && alu_op1_fwd >= alu_op2_fwd)    
+    ));
+    assign branch_taken = branch_cond || x_jal || x_jalr;
+    assign branch_target = (x_jalr) ? (alu_op1_fwd + x_imm) : (x_pc + x_imm);
+
+    // EX/MEM Update
+    always @(posedge clk) begin
+        if (rst) begin m_reg_we <= 0; m_mem_we <= 0; end
+        else begin
+            m_reg_we <= (x_is_div_op) ? 0 : x_reg_we; 
+            m_mem_we <= x_mem_we;
+            m_pc <= x_pc;
+            m_alu_result <= (x_jal || x_jalr) ? (x_pc + 4) : alu_result;
+            m_store_data <= alu_op2_fwd;
+            m_rd_addr <= x_rd_addr;
+            m_rs2_addr <= x_rs2_addr; // Support WM bypass
+            m_load <= x_load;
+            m_funct3 <= x_funct3; // Pass funct3
+            m_inst <= x_inst;
+        end
+    end
+
+  /****************/
+  /* MEMORY STAGE */
+  /****************/
+
+    // WM Bypass (writeback -> memory) for store
+    reg [`REG_SIZE:0] final_store_data;
+    always @(*) begin
+        if (w_reg_we && w_rd_addr != 0 && w_rd_addr == m_rs2_addr) final_store_data = wb_data;
+        else final_store_data = m_store_data;
+    end
+    
+    reg [3:0] mem_mask;
+    always @(*) begin
+        if (m_mem_we) begin
+            case (m_funct3)
+               3'b000: begin // SB
+                   if (m_alu_result[1:0] == 0) mem_mask = 4'b0001;
+                   else if (m_alu_result[1:0] == 1) mem_mask = 4'b0010;
+                   else if (m_alu_result[1:0] == 2) mem_mask = 4'b0100;
+                   else mem_mask = 4'b1000;
+               end
+               3'b001: begin // SH
+                   if (m_alu_result[1] == 0) mem_mask = 4'b0011;
+                   else mem_mask = 4'b1100;
+               end
+               default: mem_mask = 4'b1111; // SW
+            endcase
+        end else mem_mask = 4'b0000;
+    end
+
+    always @(*) begin
+        addr_to_dmem = m_alu_result;
+        store_we_to_dmem = mem_mask;
+        // store data shift (Alignment)
+        if (m_funct3 == 3'b000) store_data_to_dmem = {4{final_store_data[7:0]}}; // Copy byte to all positions
+        else if (m_funct3 == 3'b001) store_data_to_dmem = {2{final_store_data[15:0]}};
+        else store_data_to_dmem = final_store_data;
+    end
+
+    // Update MEM/WB
+    always @(posedge clk) begin
+        if (rst) begin 
+            w_reg_we <= 0; 
+            w_inst <= 0; 
+        end
+        else begin
+            w_pc <= m_pc; 
+            w_alu_result <= m_alu_result; 
+            w_mem_data <= load_data_from_dmem;
+            w_rd_addr <= m_rd_addr; 
+            w_reg_we <= m_reg_we; 
+            w_load <= m_load;
+            w_funct3 <= m_funct3;
+            w_byte_offset <= m_alu_result[1:0]; // Lưu offset để cắt Load Data
+            w_inst <= m_inst;
+        end
+    end
+
+  /****************/
+  /* WRITEBACK STAGE */
+  /****************/
+
+    reg [`REG_SIZE:0] processed_load_data;
+    reg [7:0] lb_byte;
+    reg [15:0] lh_half;
+    
+    always @(*) begin
+        // Extract Byte
+        case (w_byte_offset)
+            2'b00: lb_byte = w_mem_data[7:0];
+            2'b01: lb_byte = w_mem_data[15:8];
+            2'b10: lb_byte = w_mem_data[23:16];
+            2'b11: lb_byte = w_mem_data[31:24];
+        endcase
+        // Extract Half
+        case (w_byte_offset[1])
+            1'b0: lh_half = w_mem_data[15:0];
+            1'b1: lh_half = w_mem_data[31:16];
+        endcase
+        
+        // Sign/Zero Extension based on funct3
+        case (w_funct3)
+            3'b000: processed_load_data = {{24{lb_byte[7]}}, lb_byte}; // LB
+            3'b001: processed_load_data = {{16{lh_half[15]}}, lh_half}; // LH
+            3'b100: processed_load_data = {24'b0, lb_byte}; // LBU
+            3'b101: processed_load_data = {16'b0, lh_half}; // LHU
+            default: processed_load_data = w_mem_data; // LW
+        endcase
+    end
+
+    assign wb_data = (w_load) ? processed_load_data : w_alu_result;
+
+    // Divider Result Selection
+    wire div_valid   = div_busy[7][6];
+    wire div_get_rem = div_busy[7][5];
+    wire [4:0] div_dst = div_busy[7][4:0];
+    wire final_rf_we = w_reg_we || div_valid; 
+    
+    reg [4:0] final_rf_dst;
+    reg [`REG_SIZE:0] final_rf_data;
+
+    always @(*) begin
+        if (div_valid) begin
+            final_rf_dst = div_dst;
+            final_rf_data = (div_get_rem) ? div_remainder : div_quotient;
+        end else begin
+            final_rf_dst = w_rd_addr;
+            final_rf_data = wb_data;
+        end
+    end
+
+    // Trace
+    always @(*) begin
+        trace_writeback_pc = w_pc;
+        trace_writeback_inst = w_inst;
+        if (w_inst == 0) trace_writeback_pc = 0;
+    end
 
 endmodule
 
@@ -402,10 +699,10 @@ module MemorySingleCycle #(
 
   // preload instructions to mem_array
   initial begin
-    $readmemh("mem_initial_contents.hex", mem_array);
+    $readmemh("E:/test.hex", mem_array);
   end
 
-    assign load_data_from_dmem = mem_array[{addr_to_dmem[AddrMsb:AddrLsb]}];
+
 
   localparam AddrMsb = $clog2(NUM_WORDS) + 1;
   localparam AddrLsb = 2;
@@ -413,6 +710,8 @@ module MemorySingleCycle #(
   always @(negedge clk) begin
     inst_from_imem <= mem_array[{pc_to_imem[AddrMsb:AddrLsb]}];
   end
+    
+    assign load_data_from_dmem = mem_array[{addr_to_dmem[AddrMsb:AddrLsb]}];
 
   always @(negedge clk) begin
     if (store_we_to_dmem[0]) begin
