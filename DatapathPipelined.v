@@ -111,7 +111,7 @@ module DatapathPipelined (
     
     
     // Funct3 Codes
-    // Arithmetic / Logic
+    // arithmetic / logic
       localparam F3_ADD_SUB = 3'b000; // ADD/SUB/ADDI
       localparam F3_SLL     = 3'b001;
       localparam F3_SLT     = 3'b010;
@@ -121,7 +121,7 @@ module DatapathPipelined (
       localparam F3_OR      = 3'b110;
       localparam F3_AND     = 3'b111;
       
-      // Branch
+      // branch
       localparam F3_BEQ     = 3'b000;
       localparam F3_BNE     = 3'b001;
       localparam F3_BLT     = 3'b100;
@@ -129,33 +129,33 @@ module DatapathPipelined (
       localparam F3_BLTU    = 3'b110;
       localparam F3_BGEU    = 3'b111;
       
-      // Extend multiply
+      // extend multiply
       localparam F3_MUL     = 3'b000;
       localparam F3_MULH    = 3'b001;
       localparam F3_MULHSU  = 3'b010;
       localparam F3_MULHU   = 3'b011;
       
-      //Extend divide
+      // extend divide
       localparam F3_DIV     = 3'b100;
       localparam F3_DIVU    = 3'b101;
       localparam F3_REM     = 3'b110;
       localparam F3_REMU    = 3'b111;
     
-      // Load/Store
+      // load/store
       localparam F3_B       = 3'b000; // Byte
       localparam F3_H       = 3'b001; // Half
       localparam F3_W       = 3'b010; // Word
     
-      // 4. Funct7 Codes
+      // funct7 
       localparam F7_NORMAL  = 7'b0000000;
       localparam F7_SUB_SRA = 7'b0100000;
       localparam F7_M_EXT   = 7'b0000001;
       
-  // Pipeline regs
+  // pipeline regs
   // IF/ID
     reg [`REG_SIZE:0] d_pc, d_inst;
   
-  // ID/EX Registers
+  // ID/EX regs
     reg [`REG_SIZE:0] x_pc;
     reg [`REG_SIZE:0] x_rs1_data, x_rs2_data;
     reg [`REG_SIZE:0] x_imm;
@@ -165,10 +165,9 @@ module DatapathPipelined (
     reg x_is_div_op, x_div_signed, x_div_get_rem; 
     reg [2:0] x_funct3; 
     reg [1:0] x_op1_sel, x_op2_sel;
-    reg [3:0] x_mem_mask;
     reg [`INST_SIZE:0] x_inst; 
     
-  // EX/MEM Registers
+  // EX/MEM regs
     reg [`REG_SIZE:0] m_pc;
     reg [`REG_SIZE:0] m_alu_result;
     reg [`REG_SIZE:0] m_store_data;
@@ -176,10 +175,9 @@ module DatapathPipelined (
     reg m_reg_we, m_mem_we, m_load;
     reg [2:0] m_funct3;
     
-    reg [3:0] m_mem_mask;
     reg [`INST_SIZE:0] m_inst;
 
-  // MEM/WB Registers
+  // MEM/WB regs
     reg [`REG_SIZE:0] w_pc, w_alu_result, w_mem_data;
     reg [4:0] w_rd_addr;
     reg w_reg_we, w_load;
@@ -190,7 +188,7 @@ module DatapathPipelined (
     // check divider
     reg [6:0] div_busy [0:7];
     
-  // Stall (Hazard control) signal
+  // stall signal
   wire stall_pipeline; // stall all (hazard)      
   wire stall_load_use; // stall load      
   wire stall_div_dependency; //stall depend
@@ -214,7 +212,8 @@ module DatapathPipelined (
       if (rst) begin
         f_pc_current <= 32'd0;
       end else begin
-        f_pc_current <= f_pc_next;
+        if (!stall_pipeline) f_pc_current <= f_pc_next;
+        else f_pc_current <= f_pc_current;
       end
     end
     // send PC to imem
@@ -225,11 +224,13 @@ module DatapathPipelined (
             d_pc <= 0;
             d_inst <= 0; // NOP
         end else begin
-            d_pc <= f_pc_current;
-            d_inst <= inst_from_imem;
+            if (!stall_pipeline) begin
+                d_pc <= f_pc_current;
+                d_inst <= inst_from_imem;
+            end
         end
     end
-
+ 
   /****************/
   /* DECODE STAGE */
   /****************/
@@ -266,9 +267,15 @@ module DatapathPipelined (
     
     always @(*) begin
         conflict_div = 0;
+        
         for (i = 0; i < 8; i = i + 1) begin
             if (div_busy[i][6] && div_busy[i][4:0] != 0 && (div_busy[i][4:0] == rs1 || div_busy[i][4:0] == rs2)) 
               conflict_div = 1;
+        end
+        if (x_is_div_op && (x_rd_addr != 0)) begin
+            if (x_rd_addr == rs1 || x_rd_addr == rs2) begin
+                conflict_div = 1;
+            end
         end    
     end
     
@@ -278,10 +285,10 @@ module DatapathPipelined (
     assign stall_load_use = (x_load && (x_rd_addr != 0) && 
                             (x_rd_addr == rs1 || x_rd_addr == rs2));
     
-    //Stall all
+    //stall all
     assign stall_pipeline = stall_div_dependency || stall_load_use;
 
-    // Control logic
+    // control logic
     reg [4:0] ctrl_alu_op;
     reg ctrl_reg_we, ctrl_mem_we, ctrl_branch, ctrl_jal, ctrl_jalr, ctrl_load, ctrl_auipc, ctrl_lui;
     reg ctrl_is_div_op, ctrl_div_signed, ctrl_div_get_rem;
@@ -293,6 +300,9 @@ module DatapathPipelined (
         ctrl_reg_we = 0; 
         ctrl_mem_we = 0; 
         ctrl_branch = 0;
+        ctrl_is_div_op = 0;
+        ctrl_div_signed = 0;
+        ctrl_div_get_rem = 0;
         ctrl_jal = 0; 
         ctrl_jalr = 0; 
         ctrl_load = 0; 
@@ -370,9 +380,6 @@ module DatapathPipelined (
                 ctrl_mem_we = 1; 
                 ctrl_op2_sel = 2; // imm_s
                 ctrl_alu_op = ALU_ADD;
-//                if (funct3 == F3_B) ctrl_mem_mask = 4'b0001;
-//                else if (funct3 == F3_H) ctrl_mem_mask = 4'b0011;
-//                else ctrl_mem_mask = 4'b1111; // Word
             end
             
             OpcodeBranch: begin
@@ -420,13 +427,22 @@ module DatapathPipelined (
     
     always @(posedge clk) begin
         if (rst || branch_taken || stall_pipeline) begin 
-            x_reg_we <= 0; 
-            x_mem_we <= 0; 
-            x_branch <= 0; 
-            x_is_div_op <= 0;
-            x_jal <= 0; 
-            x_jalr <= 0;
+            x_reg_we      <= 0; 
+            x_mem_we      <= 0; 
+            x_branch      <= 0; 
+            x_jal         <= 0; 
+            x_jalr        <= 0; 
+            x_load        <= 0; 
+            x_auipc       <= 0; 
+            x_lui         <= 0;
+            
+            x_is_div_op <= 0; 
+            x_div_signed <= 0; 
+            x_div_get_rem <= 0;
+            
             x_inst <= 0; 
+            x_alu_op <= ALU_ADD;
+            
         end else begin
             x_pc <= d_pc;
             x_rs1_data <= rf_rs1_data_fwd;
@@ -450,7 +466,6 @@ module DatapathPipelined (
             x_op1_sel <= ctrl_op1_sel;
             x_op2_sel <= ctrl_op2_sel;
             x_funct3 <= funct3;
-//            x_mem_mask <= ctrl_mem_mask;
             x_inst <= d_inst;
         end
     end
@@ -480,12 +495,13 @@ module DatapathPipelined (
     
     reg [`REG_SIZE:0] alu_op1_fwd, alu_op2_fwd;
     always @(*) begin
+        //reg 1
         if (m_reg_we && m_rd_addr != 0 && m_rd_addr == x_rs1_addr) alu_op1_fwd = m_alu_result; 
         
         else if (w_reg_we && w_rd_addr != 0 && w_rd_addr == x_rs1_addr) alu_op1_fwd = wb_data;      
 
         else alu_op1_fwd = x_rs1_data;
-
+        //reg 2
         if (m_reg_we && m_rd_addr != 0 && m_rd_addr == x_rs2_addr) alu_op2_fwd = m_alu_result; 
         
         else if (w_reg_we && w_rd_addr != 0 && w_rd_addr == x_rs2_addr) alu_op2_fwd = wb_data; 
@@ -505,7 +521,7 @@ module DatapathPipelined (
         .Zero()
     );
     
-    // Divider
+    // divider
     wire [31:0] div_quotient, div_remainder;
     DividerPipelined div_inst (
         .clk(clk), 
@@ -529,7 +545,7 @@ module DatapathPipelined (
         end
     end
 
-    //Branching logic
+    //branching logic
     wire branch_cond = (x_branch && (
       (x_funct3 == F3_BEQ  && alu_op1_fwd == alu_op2_fwd) || 
       (x_funct3 == F3_BNE  && alu_op1_fwd != alu_op2_fwd) || 
@@ -541,9 +557,12 @@ module DatapathPipelined (
     assign branch_taken = branch_cond || x_jal || x_jalr;
     assign branch_target = (x_jalr) ? (alu_op1_fwd + x_imm) : (x_pc + x_imm);
 
-    // EX/MEM Update
+    // EX/MEM update
     always @(posedge clk) begin
-        if (rst) begin m_reg_we <= 0; m_mem_we <= 0; end
+        if (rst) begin 
+            m_reg_we <= 0; 
+            m_mem_we <= 0; 
+        end
         else begin
             m_reg_we <= (x_is_div_op) ? 0 : x_reg_we; 
             m_mem_we <= x_mem_we;
@@ -551,9 +570,9 @@ module DatapathPipelined (
             m_alu_result <= (x_jal || x_jalr) ? (x_pc + 4) : alu_result;
             m_store_data <= alu_op2_fwd;
             m_rd_addr <= x_rd_addr;
-            m_rs2_addr <= x_rs2_addr; // Support WM bypass
+            m_rs2_addr <= x_rs2_addr; // help WM bypass
             m_load <= x_load;
-            m_funct3 <= x_funct3; // Pass funct3
+            m_funct3 <= x_funct3; // pass funct3
             m_inst <= x_inst;
         end
     end
@@ -562,7 +581,7 @@ module DatapathPipelined (
   /* MEMORY STAGE */
   /****************/
 
-    // WM Bypass (writeback -> memory) for store
+    // WM Bypass for store
     reg [`REG_SIZE:0] final_store_data;
     always @(*) begin
         if (w_reg_we && w_rd_addr != 0 && w_rd_addr == m_rs2_addr) final_store_data = wb_data;
@@ -591,13 +610,13 @@ module DatapathPipelined (
     always @(*) begin
         addr_to_dmem = m_alu_result;
         store_we_to_dmem = mem_mask;
-        // store data shift (Alignment)
-        if (m_funct3 == 3'b000) store_data_to_dmem = {4{final_store_data[7:0]}}; // Copy byte to all positions
+        // store data shift (alignment)
+        if (m_funct3 == 3'b000) store_data_to_dmem = {4{final_store_data[7:0]}}; // copy byte to all positions
         else if (m_funct3 == 3'b001) store_data_to_dmem = {2{final_store_data[15:0]}};
         else store_data_to_dmem = final_store_data;
     end
 
-    // Update MEM/WB
+    // update MEM/WB
     always @(posedge clk) begin
         if (rst) begin 
             w_reg_we <= 0; 
@@ -611,7 +630,7 @@ module DatapathPipelined (
             w_reg_we <= m_reg_we; 
             w_load <= m_load;
             w_funct3 <= m_funct3;
-            w_byte_offset <= m_alu_result[1:0]; // Lưu offset để cắt Load Data
+            w_byte_offset <= m_alu_result[1:0]; // lưu offset để cắt load data
             w_inst <= m_inst;
         end
     end
@@ -625,20 +644,20 @@ module DatapathPipelined (
     reg [15:0] lh_half;
     
     always @(*) begin
-        // Extract Byte
+        // extract byte
         case (w_byte_offset)
             2'b00: lb_byte = w_mem_data[7:0];
             2'b01: lb_byte = w_mem_data[15:8];
             2'b10: lb_byte = w_mem_data[23:16];
             2'b11: lb_byte = w_mem_data[31:24];
         endcase
-        // Extract Half
+        // extract half
         case (w_byte_offset[1])
             1'b0: lh_half = w_mem_data[15:0];
             1'b1: lh_half = w_mem_data[31:16];
         endcase
         
-        // Sign/Zero Extension based on funct3
+        // sign/zero extend based on funct3
         case (w_funct3)
             3'b000: processed_load_data = {{24{lb_byte[7]}}, lb_byte}; // LB
             3'b001: processed_load_data = {{16{lh_half[15]}}, lh_half}; // LH
@@ -650,14 +669,12 @@ module DatapathPipelined (
 
     assign wb_data = (w_load) ? processed_load_data : w_alu_result;
 
-    // Divider Result Selection
+    // divider result selection
     wire div_valid   = div_busy[7][6];
     wire div_get_rem = div_busy[7][5];
     wire [4:0] div_dst = div_busy[7][4:0];
-    wire final_rf_we = w_reg_we || div_valid; 
     
-    reg [4:0] final_rf_dst;
-    reg [`REG_SIZE:0] final_rf_data;
+    assign final_rf_we = w_reg_we || div_valid; 
 
     always @(*) begin
         if (div_valid) begin
@@ -699,7 +716,7 @@ module MemorySingleCycle #(
 
   // preload instructions to mem_array
   initial begin
-    $readmemh("E:/test.hex", mem_array);
+    $readmemh("J:/Vivado project/SoC_Assignment/test.hex", mem_array);
   end
 
 
@@ -748,7 +765,7 @@ module Processor (
   wire [(8*32)-1:0] test_case;
 
   MemorySingleCycle #(
-      .NUM_WORDS(8192)
+      .NUM_WORDS(512)
   ) memory (
     .rst                 (rst),
     .clk                 (clk),
