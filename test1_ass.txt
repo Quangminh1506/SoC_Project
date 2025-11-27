@@ -1,0 +1,97 @@
+.text
+.globl main
+
+main:
+    # =========================================================
+    # 1. KHỞI TẠO
+    # =========================================================
+    addi x1, x0, 10      # x1 = 10
+    addi x2, x0, 20      # x2 = 20
+    addi x10, x0, 500    # Base Address = 500
+
+    # =========================================================
+    # 2. TEST ALU-ALU DATA HAZARD (Cần Forwarding)
+    # =========================================================
+    # Lệnh 2 (sub) cần x3 ngay khi Lệnh 1 (add) vừa tính xong.
+    # CPU cần Forward từ tầng Memory về Execute.
+    
+    add  x3, x1, x2      # x3 = 10 + 20 = 30
+    sub  x4, x3, x1      # x4 = 30 - 10 = 20 (Hazard tại x3)
+    
+    # Kiểm tra x4
+    bne  x4, x2, FAIL    # Nếu x4 != 20 -> FAIL (x2 đang là 20)
+
+    # =========================================================
+    # 3. TEST LOAD-USE HAZARD (Cần Stall + Forwarding)
+    # =========================================================
+    # Lệnh Load theo sau bởi lệnh dùng dữ liệu đó.
+    # CPU cần Stall 1 chu kỳ, sau đó Forward từ Writeback về Execute.
+    
+    addi x11, x0, 99     
+    sw   x11, 0(x10)     # Mem[500] = 99
+    
+    lw   x12, 0(x10)     # Load x12 = 99
+    add  x13, x12, x1    # x13 = 99 + 10 = 109 (Hazard tại x12!)
+    
+    addi x14, x0, 109    # Giá trị mong đợi
+    bne  x13, x14, FAIL  # Kiểm tra kết quả
+
+    # =========================================================
+    # 4. TEST BRANCH TAKEN & FLUSH (Quan trọng!)
+    # =========================================================
+    # Kịch bản: Branch đúng (Taken).
+    # Thử thách: Phải "giết" (Flush) 2 lệnh rác đi ngay sau nó.
+    
+    addi x5, x0, 0       # Canh gác x5 = 0
+    addi x6, x0, 0       # Canh gác x6 = 0
+    
+    beq  x1, x1, SKIP_TRASH  # 10 == 10 -> NHẢY!
+    
+    # --- KHU VỰC RÁC (TRASH ZONE) ---
+    # Nếu CPU không Flush kỹ, các lệnh này sẽ chạy và làm sai x5, x6
+    addi x5, x0, 0x111   # Lệnh rác 1 (Đang ở Decode khi beq ở Execute)
+    addi x6, x0, 0x222  # Lệnh rác 2 (Đang ở Fetch khi beq ở Execute)
+    addi x5, x0, 0x111   # Lệnh rác 1 (Đang ở Decode khi beq ở Execute)
+    addi x6, x0, 0x222  # Lệnh rác 2 (Đang ở Fetch khi beq ở Execute)
+    
+SKIP_TRASH:
+    # Kiểm tra xem x5, x6 có bị thay đổi không
+    bne  x5, x0, FAIL    # Nếu x5 != 0 -> FAIL (Flush Decode hỏng)
+    bne  x6, x0, FAIL    # Nếu x6 != 0 -> FAIL (Flush Fetch hỏng)
+
+    # =========================================================
+    # 5. TEST BRANCH NOT TAKEN
+    # =========================================================
+    # Kịch bản: Branch sai (Not Taken) -> Chạy tiếp bình thường.
+    
+    bne  x1, x1, FAIL    # 10 != 10 -> Sai -> Không nhảy
+    
+    # Các lệnh này PHẢI được thực hiện
+    addi x7, x0, 50      
+    add  x8, x7, x1      # x8 = 50 + 10 = 60
+    
+    addi x9, x0, 60
+    bne  x8, x9, FAIL    # Nếu tính sai -> FAIL
+
+    # =========================================================
+    # 6. SUCCESS (THÀNH CÔNG)
+    # =========================================================
+    jal  x0, PASS_LOOP
+    beq  x1, x1, FAIL
+    addi x10, x10, 100
+    addi x10, x10, 100
+    addi x10, x10, 100
+    addi x10, x10, 100
+    
+PASS_LOOP:
+    ecall                # Bật tín hiệu Halt
+    beq  x0, x0, PASS_LOOP
+
+# =========================================================
+# 7. FAIL (THẤT BẠI)
+# =========================================================
+FAIL:
+    jal  x0, FAIL_LOOP   # Kẹt ở đây, Halt = 0
+
+FAIL_LOOP:
+    beq  x0, x0, FAIL_LOOP

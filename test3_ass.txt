@@ -1,0 +1,87 @@
+.text
+.globl main
+
+main:
+    # =========================================================
+    # 1. KHỞI TẠO DỮ LIỆU
+    # =========================================================
+    addi x1, x0, 100     # x1 = 100
+    addi x2, x0, 5       # x2 = 5
+    addi x3, x0, 7       # x3 = 7
+    addi x4, x0, 500     # Base Address giả định (dùng để setup mem)
+
+    # Chuẩn bị dữ liệu trong Memory để test lệnh LW sau cùng
+    # Ta sẽ ghi giá trị 99 vào địa chỉ 502 (vì dự kiến REM trả về 2, cộng offset 500 = 502)
+    addi x20, x0, 99
+    sw   x20, 2(x4)      # Mem[502] = 99
+
+    # =========================================================
+    # 2. BẮT ĐẦU CHUỖI TEST (SEQUENCE)
+    # =========================================================
+
+    # --- 1. DIV (Bắt đầu chia) ---
+    # x5 = 100 / 5 = 20.
+    # Kết quả sẽ có sau khoảng 11 chu kỳ (Fetch -> WB).
+    div  x5, x1, x2      
+
+    # --- 2. ADD, ADD (Lệnh độc lập chèn vào giữa) ---
+    # Các lệnh này chạy song song trong khi Divider đang bận.
+    add  x6, x1, x2      # x6 = 105
+    add  x7, x6, x1      # x7 = 205 (Forwarding ALU-ALU thường)
+
+    # --- 3. SUB (HAZARD PHẢI STALL) ---
+    # x8 = x5 - x1 = 20 - 100 = -80.
+    # Lệnh này đến Decode khi DIV vẫn chưa xong.
+    # CPU phải Stall tại Decode chờ x5.
+    sub  x8, x5, x1      
+
+    # --- 4. DIV (KHÔNG HAZARD - CHẠY TIẾP) ---
+    # x9 = 100 / 7 = 14.
+    # Sau khi Stall của lệnh SUB giải tỏa, lệnh này vào Execute và Divider ngay.
+    div  x9, x1, x3      
+
+    # --- 5. REM (HAZARD SAU DIV) ---
+    # x10 = 100 % x9 = 100 % 14 = 2.
+    # Phụ thuộc vào x9 (kết quả của lệnh DIV liền trước).
+    # CPU phải Stall chờ DIV x9 xong.
+    rem  x10, x1, x9     
+
+    # --- 6. LW (HAZARD SAU REM) ---
+    # Load word từ địa chỉ: Offset 500 + Base x10.
+    # x10 = 2 (từ REM). Address = 502.
+    # Phụ thuộc vào x10. Hazard này buộc CPU stall chờ REM xong.
+    lw   x12, 500(x10)   # Mong đợi x12 = 99 (đã store ở đầu)
+
+    # =========================================================
+    # 3. KIỂM TRA KẾT QUẢ (CHECKING)
+    # =========================================================
+    
+    # Check SUB result (x8 == -80)
+    addi x21, x0, -80
+    bne  x8, x21, FAIL   # Nếu x8 != -80 -> FAIL
+
+    # Check REM result (x10 == 2)
+    addi x22, x0, 2
+    bne  x10, x22, FAIL  # Nếu x10 != 2 -> FAIL
+
+    # Check LW result (x12 == 99)
+    addi x23, x0, 99
+    bne  x12, x23, FAIL  # Nếu Load sai -> FAIL (Lỗi Load-Use hoặc tính sai địa chỉ)
+
+    # =========================================================
+    # 4. SUCCESS
+    # =========================================================
+    ecall                # Halt = 1
+    jal  x0, PASS_LOOP
+
+PASS_LOOP:
+    beq  x0, x0, PASS_LOOP
+
+# =========================================================
+# 5. FAIL
+# =========================================================
+FAIL:
+    jal  x0, FAIL_LOOP   # Kẹt tại đây, Halt = 0
+
+FAIL_LOOP:
+    beq  x0, x0, FAIL_LOOP

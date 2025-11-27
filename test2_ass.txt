@@ -1,0 +1,92 @@
+.text
+.globl main
+
+main:
+    # =========================================================
+    # 1. KHỞI TẠO & MEMORY BASE
+    # =========================================================
+    # x4 dùng làm Base Address = 500 (Tránh địa chỉ 0)
+    addi x4, x0, 500     
+
+    # Dữ liệu test
+    addi x1, x0, 100     # x1 = 100
+    addi x2, x0, -100    # x2 = -100
+    addi x3, x0, 7       # x3 = 7
+
+    # =========================================================
+    # 2. TEST MEMORY (Tại địa chỉ 500)
+    # =========================================================
+    sw   x1, 0(x4)       # Store 100 vào Mem[500]
+    lw   x5, 0(x4)       # Load từ Mem[500]
+    bne  x1, x5, FAIL    # Nếu sai -> Nhảy thẳng Loop Fail
+
+    # =========================================================
+    # 3. TEST SIGNED DIV / REM (Chia CÓ DẤU)
+    # =========================================================
+    
+    # --- TEST DIV: -100 / 7 = -14 ---
+    div  x6, x2, x3      
+    addi x8, x0, -14
+    bne  x6, x8, FAIL    
+
+    # --- TEST REM: -100 % 7 = -2 ---
+    rem  x7, x2, x3
+    addi x9, x0, -2
+    bne  x7, x9, FAIL    
+
+    # =========================================================
+    # 4. TEST UNSIGNED DIVU (Chia KHÔNG DẤU)
+    # =========================================================
+    
+    # Case: 0x80000000 / 2
+    # Nếu hiểu nhầm là có dấu (Signed) -> Kết quả âm
+    # Nếu đúng là không dấu (Unsigned) -> Kết quả 0x40000000
+    
+    lui  x10, 0x80000    # x10 = 0x80000000
+    addi x11, x0, 2      # x11 = 2
+    
+    divu x12, x10, x11   # Thực hiện chia Unsigned
+    
+    lui  x13, 0x40000    # x13 = 0x40000000 (Kết quả mong đợi)
+    bne  x12, x13, FAIL  # Nếu khác -> FAIL
+
+    # =========================================================
+    # 5. TEST UNSIGNED REMU (Chia lấy dư KHÔNG DẤU)
+    # =========================================================
+    
+    # Case: -1 (0xFFFFFFFF) % 16 = 15
+    addi x14, x0, -1     # x14 = 0xFFFFFFFF
+    addi x15, x0, 16     # x15 = 16
+    
+    remu x16, x14, x15   # x16 mong đợi = 15 (0xF)
+    
+    addi x17, x0, 15     
+    bne  x16, x17, FAIL  
+
+    # =========================================================
+    # 6. TEST STALL (Kiểm tra xem CPU có đợi đủ 8 cycle không)
+    # =========================================================
+    # Ghi ngay kết quả vừa tính (x16) vào Mem[504]
+    # Nếu không stall, Store có thể ghi sai giá trị
+    sw   x16, 4(x4)      
+    lw   x18, 4(x4)      
+    bne  x16, x18, FAIL
+
+    # =========================================================
+    # 7. SUCCESS (THÀNH CÔNG)
+    # =========================================================
+    ecall                # Bật tín hiệu Halt = 1
+    jal  x0, PASS_LOOP
+
+PASS_LOOP:
+    beq  x0, x0, PASS_LOOP  # Kẹt ở đây nếu PASS
+
+# =========================================================
+# 8. FAIL (THẤT BẠI)
+# =========================================================
+FAIL:
+    # Không ghi gì cả, chỉ loop
+    jal  x0, FAIL_LOOP
+
+FAIL_LOOP:
+    beq  x0, x0, FAIL_LOOP  # Kẹt ở đây nếu FAIL
